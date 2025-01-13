@@ -7,46 +7,95 @@
 #include "duckdb/function/scalar_function.hpp"
 #include "duckdb/main/extension_util.hpp"
 #include <duckdb/parser/parsed_data/create_scalar_function_info.hpp>
+#include "duckdb/parser/parsed_data/create_aggregate_function_info.hpp"
+#include "duckdb/function/function_set.hpp"
+#include "duckdb/parser/parsed_data/create_aggregate_function_info.hpp"
+
+#include "get_entropy.cpp"
+#include "lift.cpp"
+#include "sum.cpp"
+#include "sum_no_lift.cpp"
 
 // OpenSSL linked through vcpkg
 #include <openssl/opensslv.h>
 
 namespace duckdb {
 
-inline void QuackScalarFun(DataChunk &args, ExpressionState &state, Vector &result) {
-    auto &name_vector = args.data[0];
-    UnaryExecutor::Execute<string_t, string_t>(
-	    name_vector, result, args.size(),
-	    [&](string_t name) {
-			return StringVector::AddString(result, "Quack "+name.GetString()+" 🐥");;
-        });
+void registerLiftFunction(DuckDB &db) {
+	auto liftFunc = ScalarFunction(
+		"lift",
+		{duckdb::LogicalType::LIST(duckdb::LogicalType::VARCHAR)},
+		duckdb::LogicalType::LIST(duckdb::LogicalType::UBIGINT),
+		lift::liftFunction
+	);
+	ExtensionUtil::RegisterFunction(*db.instance, liftFunc);
 }
 
-inline void QuackOpenSSLVersionScalarFun(DataChunk &args, ExpressionState &state, Vector &result) {
-    auto &name_vector = args.data[0];
-    UnaryExecutor::Execute<string_t, string_t>(
-	    name_vector, result, args.size(),
-	    [&](string_t name) {
-			return StringVector::AddString(result, "Quack " + name.GetString() +
-                                                     ", my linked OpenSSL version is " +
-                                                     OPENSSL_VERSION_TEXT );;
-        });
+void registerSumDictFunction(DuckDB &db) {
+	auto arg_types = duckdb::vector<duckdb::LogicalType>{
+		duckdb::LogicalType::LIST(duckdb::LogicalType::UBIGINT)
+	};
+
+	auto sumDictFunc = duckdb::AggregateFunction(
+		"custom_sum",
+		arg_types,
+		duckdb::LogicalType::LIST(
+			duckdb::LogicalType::MAP(duckdb::LogicalType::UBIGINT, duckdb::LogicalType::INTEGER)
+		),
+		duckdb::AggregateFunction::StateSize<customSum::CustomSumState>,
+		duckdb::AggregateFunction::StateInitialize<customSum::CustomSumState, customSum::CustomSumFunction>,
+		customSum::customSumUpdate,
+		customSum::customSumCombine,
+		customSum::customSumFinalize,
+		nullptr,
+		customSum::customSumBind,
+		duckdb::AggregateFunction::StateDestroy<customSum::CustomSumState, customSum::CustomSumFunction>
+	);
+
+	ExtensionUtil::RegisterFunction(*db.instance, sumDictFunc);
 }
 
-static void LoadInternal(DatabaseInstance &instance) {
-    // Register a scalar function
-    auto quack_scalar_function = ScalarFunction("quack", {LogicalType::VARCHAR}, LogicalType::VARCHAR, QuackScalarFun);
-    ExtensionUtil::RegisterFunction(instance, quack_scalar_function);
+void registerSumNoLiftFunction(DuckDB &db) {
+	auto arg_types = {duckdb::LogicalType::LIST(duckdb::LogicalType::ANY)};
 
-    // Register another scalar function
-    auto quack_openssl_version_scalar_function = ScalarFunction("quack_openssl_version", {LogicalType::VARCHAR},
-                                                LogicalType::VARCHAR, QuackOpenSSLVersionScalarFun);
-    ExtensionUtil::RegisterFunction(instance, quack_openssl_version_scalar_function);
+	auto sumNoLiftFunc = duckdb::AggregateFunction(
+		"sum_no_lift",
+		arg_types,
+		duckdb::LogicalType::LIST(
+			duckdb::LogicalType::MAP(duckdb::LogicalType::UBIGINT, duckdb::LogicalType::INTEGER)
+		),
+		duckdb::AggregateFunction::StateSize<sumNoLift::SumNoLiftState>,
+		duckdb::AggregateFunction::StateInitialize<sumNoLift::SumNoLiftState, sumNoLift::SumNoLiftFunction>,
+		sumNoLift::sumNoLiftUpdate,
+		sumNoLift::sumNoLiftCombine,
+		sumNoLift::sumNoLiftFinalize,
+		nullptr,
+		sumNoLift::sumNoLiftBind,
+		duckdb::AggregateFunction::StateDestroy<sumNoLift::SumNoLiftState, sumNoLift::SumNoLiftFunction>
+	);
+
+	ExtensionUtil::RegisterFunction(*db.instance, sumNoLiftFunc);
+}
+
+void registerGetEntropyFunction(DuckDB &db) {
+	auto getEntropyFunc = ScalarFunction(
+		"get_entropy",
+		{duckdb::LogicalType::LIST(
+			duckdb::LogicalType::MAP(duckdb::LogicalType::UBIGINT, duckdb::LogicalType::INTEGER))},
+		duckdb::LogicalType::MAP(duckdb::LogicalType::VARCHAR, duckdb::LogicalType::DOUBLE),
+		getEntropy::getEntropyFunction
+	);
+
+	ExtensionUtil::RegisterFunction(*db.instance, getEntropyFunc);
 }
 
 void QuackExtension::Load(DuckDB &db) {
-	LoadInternal(*db.instance);
+	registerLiftFunction(db);
+	registerSumDictFunction(db);
+	registerSumNoLiftFunction(db);
+	registerGetEntropyFunction(db);
 }
+
 std::string QuackExtension::Name() {
 	return "quack";
 }

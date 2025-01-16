@@ -9,28 +9,10 @@ namespace lift {
 
 using hash_t = uint64_t;
 
+// TODO: This can be improved if we use an XOR-based hash combiner and 
+// maintain a single running hash. 
 hash_t combineHashes(hash_t a, hash_t b) {
     return a ^ (b + 0x9e3779b9 + (a << 6) + (a >> 2));
-}
-
-std::vector<std::string> getStringCombinations(const duckdb::vector<duckdb::Value>& values) {
-    std::vector<std::string> result;
-    std::vector<std::string> stack;
-
-    std::function<void(int)> generateCombinations = [&](int start) {
-        for (int i = start; i < values.size(); i++) {
-            stack.push_back(values[i].ToString());
-            result.push_back("");
-            for (const auto& str : stack) {
-                result.back() += str;
-            }
-            generateCombinations(i + 1);
-            stack.pop_back();
-        }
-    };
-
-    generateCombinations(0);
-    return result;
 }
 
 duckdb::vector<duckdb::Value> getHashCombinations(const duckdb::vector<duckdb::Value>& values) {
@@ -49,6 +31,26 @@ duckdb::vector<duckdb::Value> getHashCombinations(const duckdb::vector<duckdb::V
             stack.pop_back();
         }
     };
+    generateCombinations(0);
+    return result;
+}
+
+std::vector<std::string> getStringCombinations(const duckdb::vector<duckdb::Value>& values) {
+    std::vector<std::string> result;
+    std::vector<std::string> stack;
+
+    std::function<void(int)> generateCombinations = [&](int start) {
+        for (int i = start; i < values.size(); i++) {
+            stack.push_back(values[i].ToString());
+            result.push_back("");
+            for (const auto& str : stack) {
+                result.back() += str;
+            }
+            generateCombinations(i + 1);
+            stack.pop_back();
+        }
+    };
+
     generateCombinations(0);
     return result;
 }

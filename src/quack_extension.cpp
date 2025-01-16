@@ -13,6 +13,7 @@
 
 #include "get_entropy.cpp"
 #include "lift.cpp"
+#include "lift_exact.cpp"
 #include "sum.cpp"
 #include "sum_no_lift.cpp"
 
@@ -29,6 +30,16 @@ void registerLiftFunction(DuckDB &db) {
 		lift::liftFunction
 	);
 	ExtensionUtil::RegisterFunction(*db.instance, liftFunc);
+}
+
+void registerLiftExactFunction(DuckDB &db) {
+	auto liftExactFunc = ScalarFunction(
+		"lift_exact",
+		{duckdb::LogicalType::LIST(duckdb::LogicalType::VARCHAR), duckdb::LogicalType::INTEGER},
+		duckdb::LogicalType::LIST(duckdb::LogicalType::UBIGINT),
+		lift_exact::liftExactFunction
+	);
+	ExtensionUtil::RegisterFunction(*db.instance, liftExactFunc);
 }
 
 void registerSumDictFunction(DuckDB &db) {
@@ -91,6 +102,7 @@ void registerGetEntropyFunction(DuckDB &db) {
 
 void QuackExtension::Load(DuckDB &db) {
 	registerLiftFunction(db);
+	registerLiftExactFunction(db);
 	registerSumDictFunction(db);
 	registerSumNoLiftFunction(db);
 	registerGetEntropyFunction(db);

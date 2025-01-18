@@ -16,6 +16,7 @@
 #include "lift_exact.cpp"
 #include "sum.cpp"
 #include "sum_no_lift.cpp"
+#include "prune.cpp"
 
 // OpenSSL linked through vcpkg
 #include <openssl/opensslv.h>
@@ -25,8 +26,11 @@ namespace duckdb {
 void registerLiftFunction(DuckDB &db) {
 	auto liftFunc = ScalarFunction(
 		"lift",
-		{duckdb::LogicalType::LIST(duckdb::LogicalType::VARCHAR)},
-		duckdb::LogicalType::LIST(duckdb::LogicalType::UBIGINT),
+		{LogicalType::LIST(LogicalType::VARCHAR)},
+		LogicalType::MAP(
+			LogicalType::LIST(LogicalType::INTEGER), // key: attr set
+			LogicalType::UBIGINT // value: hash
+		),
 		lift::liftFunction
 	);
 	ExtensionUtil::RegisterFunction(*db.instance, liftFunc);
@@ -35,43 +39,52 @@ void registerLiftFunction(DuckDB &db) {
 void registerLiftExactFunction(DuckDB &db) {
 	auto liftExactFunc = ScalarFunction(
 		"lift_exact",
-		{duckdb::LogicalType::LIST(duckdb::LogicalType::VARCHAR), duckdb::LogicalType::INTEGER},
-		duckdb::LogicalType::LIST(duckdb::LogicalType::UBIGINT),
+		{LogicalType::LIST(LogicalType::VARCHAR), LogicalType::INTEGER},
+		LogicalType::MAP(
+			LogicalType::LIST(LogicalType::INTEGER), // key: attr set
+			LogicalType::UBIGINT // value: hash
+		),
 		lift_exact::liftExactFunction
 	);
 	ExtensionUtil::RegisterFunction(*db.instance, liftExactFunc);
 }
 
-void registerSumDictFunction(DuckDB &db) {
-	auto arg_types = duckdb::vector<duckdb::LogicalType>{
-		duckdb::LogicalType::LIST(duckdb::LogicalType::UBIGINT)
+void registerCustomSumFunction(DuckDB &db) {
+	auto argTypes = duckdb::vector<LogicalType>{
+		LogicalType::MAP(
+			LogicalType::LIST(LogicalType::INTEGER), // key: attr set
+			LogicalType::UBIGINT					 // value: hash
+		)
 	};
 
-	auto sumDictFunc = duckdb::AggregateFunction(
+	auto returnType = LogicalType::MAP(
+		LogicalType::LIST(LogicalType::INTEGER), // key: attr set
+		LogicalType::LIST(LogicalType::INTEGER) // value: dist
+	);
+
+	auto customSumFunc = AggregateFunction(
 		"custom_sum",
-		arg_types,
-		duckdb::LogicalType::LIST(
-			duckdb::LogicalType::MAP(duckdb::LogicalType::UBIGINT, duckdb::LogicalType::INTEGER)
-		),
-		duckdb::AggregateFunction::StateSize<customSum::CustomSumState>,
-		duckdb::AggregateFunction::StateInitialize<customSum::CustomSumState, customSum::CustomSumFunction>,
+		argTypes,
+		returnType,
+		AggregateFunction::StateSize<customSum::CustomSumState>,
+		AggregateFunction::StateInitialize<customSum::CustomSumState, customSum::CustomSumFunction>,
 		customSum::customSumUpdate,
 		customSum::customSumCombine,
 		customSum::customSumFinalize,
 		nullptr,
 		customSum::customSumBind,
-		duckdb::AggregateFunction::StateDestroy<customSum::CustomSumState, customSum::CustomSumFunction>
+		AggregateFunction::StateDestroy<customSum::CustomSumState, customSum::CustomSumFunction>
 	);
 
-	ExtensionUtil::RegisterFunction(*db.instance, sumDictFunc);
+	ExtensionUtil::RegisterFunction(*db.instance, customSumFunc);
 }
 
 void registerSumNoLiftFunction(DuckDB &db) {
-	auto arg_types = {duckdb::LogicalType::LIST(duckdb::LogicalType::ANY)};
+	auto argTypes = {duckdb::LogicalType::LIST(duckdb::LogicalType::ANY)};
 
 	auto sumNoLiftFunc = duckdb::AggregateFunction(
 		"sum_no_lift",
-		arg_types,
+		argTypes,
 		duckdb::LogicalType::LIST(
 			duckdb::LogicalType::MAP(duckdb::LogicalType::UBIGINT, duckdb::LogicalType::INTEGER)
 		),
@@ -100,12 +113,32 @@ void registerGetEntropyFunction(DuckDB &db) {
 	ExtensionUtil::RegisterFunction(*db.instance, getEntropyFunc);
 }
 
+void registerPruneFunction(DuckDB &db) {
+	auto argTypes = {LogicalType::MAP(
+		LogicalType::LIST(LogicalType::INTEGER), // key: attr set
+		LogicalType::LIST(LogicalType::INTEGER)  // value: dist
+	)};
+	auto resultType = LogicalType::MAP(
+		LogicalType::LIST(LogicalType::INTEGER), // key: attr set
+		LogicalType::DOUBLE // value: entropy
+	);
+	auto pruneFunc = ScalarFunction(
+		"prune",
+		argTypes,
+		resultType,
+		prune::pruneFunction
+	);
+
+	ExtensionUtil::RegisterFunction(*db.instance, pruneFunc);
+}
+
 void QuackExtension::Load(DuckDB &db) {
 	registerLiftFunction(db);
 	registerLiftExactFunction(db);
-	registerSumDictFunction(db);
+	registerCustomSumFunction(db);
 	registerSumNoLiftFunction(db);
 	registerGetEntropyFunction(db);
+	registerPruneFunction(db);
 }
 
 std::string QuackExtension::Name() {

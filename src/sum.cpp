@@ -2,19 +2,41 @@
 
 #include <map>
 #include <vector>
+#include <set>
+
+// TODO: We don't need to save the values in the map, just the count
+// all we care about is the relevent distribution
+
+// Correction: we need the values during the update process to correctly update counts 
+// after that, we can discard the particular values for the output
+
+// The attribute sets are the same for all rows, so we only need to store them once
 
 namespace customSum {
 
 using hash_t = uint64_t;
+using AttributeSet = std::set<int>;
+
+void printAttributeSet(const AttributeSet& attSet) {
+    std::string out = "[";
+    for (const int i : attSet) {
+        out += std::to_string(i) + ", ";
+    }
+    out.pop_back();
+    out.pop_back();
+    out += "]\n";
+    std::cout << out;
+}
 
 struct CustomSumState {
+    std::vector<AttributeSet> attributeSets;
     std::vector<std::map<hash_t, int64_t>> maps;
 };
 
 struct CustomSumFunction {
     template <class STATE>
     static void Initialize(STATE &state) {
-        state.maps = {};
+        return;
     }
 
     template <class STATE>
@@ -28,28 +50,45 @@ struct CustomSumFunction {
 };
 
 static void customSumUpdate(duckdb::Vector inputs[], duckdb::AggregateInputData &, idx_t inputCount, duckdb::Vector &stateVector, idx_t count) {
-    auto &tuples = inputs[0];
-    duckdb::UnifiedVectorFormat tuplesData;
+    // Input from lift function is map:
+    // key: INTEGER[] (attribute set)
+    // value: UBIGINT (hash)
+    
+    auto inputMaps = inputs[0];
+    duckdb::UnifiedVectorFormat mapsData; // TODO: needed?
     duckdb::UnifiedVectorFormat sdata;
-
-    tuples.ToUnifiedFormat(count, tuplesData);
+    inputMaps.ToUnifiedFormat(count, mapsData);
     stateVector.ToUnifiedFormat(count, sdata);
-    auto states = (CustomSumState **)sdata.data;
 
     // Assuming no GROUP BY clause is passed, therefore single state 
+    auto states = (CustomSumState **)sdata.data;
     auto &state = *states[sdata.sel->get_index(0)];
 
-    // Create empty maps for all combinations
-    auto mapCount = duckdb::ListValue::GetChildren(tuples.GetValue(0)).size();
-    state.maps = std::vector<std::map<hash_t, int64_t>>(mapCount);
+    // Create containers for attrSets and maps 
+    auto combinationCount = duckdb::MapValue::GetChildren(inputMaps.GetValue(0)).size();
+    state.attributeSets.resize(combinationCount);
+    state.maps.resize(combinationCount);
 
-    for (idx_t i = 0; i < count; i++) { 
-        // Iterate through rows 
-        auto combinations = duckdb::ListValue::GetChildren(tuples.GetValue(i));
-        for (int j = 0; j < mapCount; j++) {
-            state.maps[j][combinations[j].GetValue<hash_t>()]++;
+    // Get attribute sets from the first row (all rows have the same attribute sets)
+    auto firstMap = duckdb::MapValue::GetChildren(inputMaps.GetValue(0));
+    for (idx_t i = 0; i < combinationCount; i++) {
+        auto attrSet = duckdb::MapValue::GetChildren(firstMap[i])[0];
+        std::set<int> attIndeces;
+        for (const auto& attr : duckdb::ListValue::GetChildren(attrSet)) {
+            attIndeces.insert(attr.GetValue<int>());
         }
-    } 
+        state.attributeSets[i] = attIndeces;
+    }
+
+    // Count occurrences
+    for (idx_t i = 0; i < count; i++) {
+        auto tuple = duckdb::MapValue::GetChildren(inputMaps.GetValue(i)); // i-th tuple
+        for (idx_t j = 0; j < combinationCount; j++) {
+            auto combination = tuple[j]; //j-th pair in map
+            hash_t hash = duckdb::MapValue::GetChildren(combination)[1].GetValue<hash_t>();
+            state.maps[j][hash]++;
+        }
+    }
 }
 
 static void customSumCombine(duckdb::Vector &stateVector, duckdb::Vector &combined, duckdb::AggregateInputData &, idx_t count) {    
@@ -67,11 +106,13 @@ static void customSumCombine(duckdb::Vector &stateVector, duckdb::Vector &combin
         }
 
         if (combinedPtr[i]->maps.empty()) {
-            // Combined maps not initialized, copy state maps
+            // Combined not initialized, copy over maps and att sets
             combinedPtr[i]->maps = state.maps;
+            combinedPtr[i]->attributeSets = state.attributeSets;
         } else {
-            // Both state and combined maps are initialized, combine
+            // Both state and combined are initialized, combine
             // Assume that maps are in the same order
+            // Attribute sets should be the same for the combining states?
             for (idx_t j = 0; j < state.maps.size(); j++) {
                 for (const auto& [k, v] : state.maps[j]) {
                     combinedPtr[i]->maps[j][k] += v;
@@ -81,37 +122,54 @@ static void customSumCombine(duckdb::Vector &stateVector, duckdb::Vector &combin
     }
 }
 
-static void customSumFinalize(duckdb::Vector &stateVector, duckdb::AggregateInputData &, duckdb::Vector &result, idx_t count, idx_t offset) {    
+static void customSumFinalize(duckdb::Vector &stateVector, duckdb::AggregateInputData &, duckdb::Vector &result, idx_t count, idx_t offset) {        
+    // Output is map
+    // key: INTEGER[] (attribute set)
+    // value: INTEGER[] (dist)
+    
     duckdb::UnifiedVectorFormat sdata;
     stateVector.ToUnifiedFormat(count, sdata);
-    auto states = (CustomSumState **)sdata.data;
     auto &mask = duckdb::FlatVector::Validity(result);
     auto oldLen = duckdb::ListVector::GetListSize(result);
 
     // Assuming no GROUP BY clause is passed, therefore single state
+    auto states = (CustomSumState **)sdata.data;
     auto &state = *states[sdata.sel->get_index(0)];
 
-    // Create result list 
-    for (const auto& map : state.maps) {
-        auto mapSize = map.size();
-        duckdb::vector<duckdb::Value> keys(mapSize);
-        duckdb::vector<duckdb::Value> values(mapSize);
-        
-        idx_t index = 0;
-        for (const auto& [k, v] : map) {
-            keys[index] = duckdb::Value::UBIGINT(k);
-            values[index] = duckdb::Value::INTEGER(v);
-            index++;
+    // Create result map 
+    int resultCount = state.maps.size();
+    duckdb::vector<duckdb::Value> keys(resultCount);
+    duckdb::vector<duckdb::Value> values(resultCount);
+
+    for (idx_t i = 0; i < resultCount; i++) {
+        // Create duckdb::Value for key
+        AttributeSet attSet = state.attributeSets[i];
+        duckdb::vector<duckdb::Value> keyVec(attSet.size());
+        size_t idx = 0;
+        for (const int att : attSet) {
+            keyVec[idx++] = duckdb::Value::INTEGER(att);
+        }
+        keys[i] = duckdb::Value::LIST(keyVec);
+
+        // Create duckdb::Value for value
+        std::map<hash_t, int64_t> &map = state.maps[i];
+        duckdb::vector<duckdb::Value> valueVec(map.size());
+        idx = 0;
+        for (const auto& [_, v] : map) {
+            valueVec[idx++] = duckdb::Value::INTEGER(v);
         }
 
-        duckdb::Value combination_map = duckdb::Value::MAP(
-            duckdb::LogicalType::UBIGINT, // key type 
-            duckdb::LogicalType::INTEGER, // value type
-            keys,
-            values
-        );
-        duckdb::ListVector::PushBack(result, combination_map);
+        values[i] = duckdb::Value::LIST(valueVec);
     }
+    
+    // Set result
+    duckdb::Value resultMap = duckdb::Value::MAP(
+        duckdb::LogicalType::LIST(duckdb::LogicalType::INTEGER), // key type
+        duckdb::LogicalType::LIST(duckdb::LogicalType::INTEGER), // value type
+        keys, values
+    );
+
+    result.SetValue(0, resultMap);
 
     // Set result list size
     auto resultData = duckdb::ListVector::GetData(result);
@@ -124,7 +182,10 @@ static void customSumFinalize(duckdb::Vector &stateVector, duckdb::AggregateInpu
 }
 
 duckdb::unique_ptr<duckdb::FunctionData> customSumBind(duckdb::ClientContext &context, duckdb::AggregateFunction &function, duckdb::vector<duckdb::unique_ptr<duckdb::Expression>> &arguments) {
-    auto resType = duckdb::LogicalType::LIST(duckdb::LogicalType::MAP(duckdb::LogicalType::UBIGINT, duckdb::LogicalType::INTEGER));
+    auto resType = duckdb::LogicalType::MAP(
+        duckdb::LogicalType::LIST(duckdb::LogicalType::INTEGER), // key: attr set
+        duckdb::LogicalType::LIST(duckdb::LogicalType::INTEGER) // value: dist
+    );
     function.return_type = resType;
     return duckdb::make_uniq<duckdb::VariableReturnBindData>(function.return_type);
 }

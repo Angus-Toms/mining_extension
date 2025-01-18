@@ -15,6 +15,26 @@ hash_t combineHashes(hash_t a, hash_t b) {
     return a ^ (b + 0x9e3779b9 + (a << 6) + (a >> 2));
 }
 
+duckdb::vector<duckdb::Value> getIndexCombinations(const std::vector<int>& indeces) {
+    duckdb::vector<duckdb::Value> result;
+    std::vector<int> stack;
+
+    std::function<void(int)> generateCombinations = [&](int start) {
+        for (int i = start; i < indeces.size(); i++) {
+            stack.push_back(indeces[i]);
+            duckdb::vector<duckdb::Value> currCombination;
+            for (const auto& idx : stack) {
+                currCombination.push_back(duckdb::Value::INTEGER(idx));
+            }
+            result.push_back(duckdb::Value::LIST(currCombination));
+            generateCombinations(i + 1);
+            stack.pop_back();
+        }
+    };
+    generateCombinations(0);
+    return result;
+}
+
 duckdb::vector<duckdb::Value> getHashCombinations(const duckdb::vector<duckdb::Value>& values) {
     duckdb::vector<duckdb::Value> result;
     std::vector<hash_t> stack;
@@ -57,15 +77,30 @@ std::vector<std::string> getStringCombinations(const duckdb::vector<duckdb::Valu
 
 void liftFunction(duckdb::DataChunk &args, duckdb::ExpressionState &state, duckdb::Vector &result) {
     auto count = args.size();
-    auto& inData = args.data[0]; // All cols wrapped in list
+    auto& atts = args.data[0]; // All cols wrapped in list
+    int attrCount = duckdb::ListValue::GetChildren(atts.GetValue(0)).size();
     duckdb::ListVector::Reserve(result, count);
 
-    for (int i = 0; i < count; i++) {
-        std::cout << i << "\n";
-        auto tuple = duckdb::ListValue::GetChildren(inData.GetValue(i));
-        duckdb::vector<duckdb::Value> hashList = getHashCombinations(tuple);
+    // Get attribute indeces 
+    std::vector<int> indeces(attrCount);
+    for (int i = 0; i < attrCount; i++) {
+        std::string attrName = state.child_states[0]->child_states[i]->expr.GetName();
+        indeces[i] = std::stoi(attrName.substr(3));
+    }
 
-        result.SetValue(i, duckdb::Value::LIST(hashList));
+    // Generate result keys (attr combinations) - same for all tuples
+    duckdb::vector<duckdb::Value> keys = getIndexCombinations(indeces);
+
+    for (int i = 0; i < count; i++) {
+        auto tuple = duckdb::ListValue::GetChildren(atts.GetValue(i));
+        duckdb::vector<duckdb::Value> values = getHashCombinations(tuple);
+        duckdb::Value tupleMap = duckdb::Value::MAP(
+            duckdb::LogicalType::LIST(duckdb::LogicalType::INTEGER), // key type 
+            duckdb::LogicalType::UBIGINT, // value type
+            keys,
+            values
+        );
+        result.SetValue(i, tupleMap);
     }
 }
 
